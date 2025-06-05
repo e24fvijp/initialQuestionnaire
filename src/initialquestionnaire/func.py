@@ -1,6 +1,3 @@
-"""
-Google Apps Scriptのエンドポイントからデータを取得するクライアントプログラム
-"""
 import os
 import pickle
 import requests
@@ -21,6 +18,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import win32api
 import win32print
+import threading
 
 class QuestionTitle:
 
@@ -104,6 +102,13 @@ class ConnectToGoogleAppsScript:
         except json.JSONDecodeError:
             return {"error": "レスポンスの解析に失敗しました。"}
         
+    def _calc_age(self,birthday):
+        today = datetime.date.today()
+        age = today.year - birthday.year
+        if (today.month, today.day) < (birthday.month, birthday.day):
+            age -= 1
+        return age
+
     def _clean_text(self,text):
 
         if not isinstance(text, str):
@@ -133,7 +138,7 @@ class ConnectToGoogleAppsScript:
         
     def _save_questionnaire_data_by_date(self, data):
         """
-        日付ごとにアンケートデータを保存する
+        日付ごとにアンケートデータを保存する（既存データがあれば差分のみ追加）
         """
         # データを日付ごとにグループ化
         date_groups = {}
@@ -148,20 +153,34 @@ class ConnectToGoogleAppsScript:
                 except (ValueError, TypeError):
                     continue
 
-        # 日付ごとにファイルに保存
-        for date_str, records in date_groups.items():
+        # 日付ごとにファイルに保存（差分追加）
+        for date_str, new_records in date_groups.items():
             file_name = f"{date_str}.pickle"
             file_path = os.path.join(self.data_dir, file_name)
-            
-            # データを上書き保存
+            existing_records = []
+            # 既存データがあれば読み込む
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, "rb") as f:
+                        existing_records = pickle.load(f)
+                except Exception:
+                    existing_records = []
+            # 既存データのtimestampセット
+            existing_timestamps = set(r['timestamp'] for r in existing_records if 'timestamp' in r)
+            # 新規データで既存にないものだけ追加
+            merged_records = existing_records[:]
+            for record in new_records:
+                if record['timestamp'] not in existing_timestamps:
+                    merged_records.append(record)
+            # 保存
             with open(file_path, "wb") as f:
-                pickle.dump(records, f)
+                pickle.dump(merged_records, f)
 
 class PrintData:
     def __init__(self, data_text):
         self.data_text = data_text
 
-    def print_data(self):
+    def print_data(self, printer_name=None):
         try:
             # 日本語フォントの設定
             font_path = "C:/Windows/Fonts/msgothic.ttc"
@@ -253,40 +272,22 @@ class PrintData:
             # PDFの生成
             doc.build(content)
             
-            try:
-                # 利用可能なプリンターを取得
-                printers = [printer[2] for printer in win32print.EnumPrinters(2)]
-                if not printers:
-                    raise Exception("利用可能なプリンターが見つかりません")
-                
-                # デフォルトプリンターを取得
-                default_printer = win32print.GetDefaultPrinter()
-                if not default_printer:
-                    default_printer = printers[0]  # 最初のプリンターを使用
-                
-                # PDFを印刷
-                if os.name == 'nt':  # Windowsの場合
-                    import subprocess
-                    # Adobe Readerを使用して印刷
-                    acrobat_path = r"C:\Program Files (x86)\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe"
-                    if not os.path.exists(acrobat_path):
-                        acrobat_path = r"C:\Program Files\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe"
-                    
-                    if os.path.exists(acrobat_path):
-                        subprocess.run([acrobat_path, '/t', temp_file_path, default_printer], shell=True)
-                    else:
-                        # Adobe Readerが見つからない場合は、デフォルトのPDFビューアで開く
-                        os.startfile(temp_file_path)
-                else:
-                    raise Exception("この機能はWindowsでのみ利用可能です")
-                
-            except Exception as e:
-                print(f"プリンターエラー: {str(e)}")
-                # エラー時はPDFを開く
-                os.startfile(temp_file_path)
+            # Aspose.PDFを使用して印刷
+            import aspose.pdf as ap
+            viewer = ap.facades.PdfViewer()
+            viewer.bind_pdf(temp_file_path)
+            
+            # # プリンター名が指定されている場合は設定
+            # if printer_name:
+            #     viewer.printer_settings.printer_name = printer_name
+            
+            # PDFを印刷
+            viewer.print_document()
+            
+            # PDFビューアを閉じる
+            viewer.close()
             
             # 一時ファイルを削除（少し遅延を入れて印刷が開始されるのを待つ）
-            import threading
             def delete_temp_file():
                 import time
                 time.sleep(5)  # 5秒待機
@@ -295,6 +296,7 @@ class PrintData:
                 except:
                     pass
             
+
             threading.Thread(target=delete_temp_file).start()
             
         except Exception as e:
